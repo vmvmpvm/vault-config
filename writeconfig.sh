@@ -21,7 +21,7 @@ InteractiveDockerUser=
 DOMAIN=
 APP_PATH=
 INSTANCE_2_DOMAIN=
-INSTANCE _2_APP_PATH=securesafe
+INSTANCE_2_APP_PATH=securesafe
 
 SMTP_HOST=smtp.gmail.com
 SMTP_VAULTWARDEN_FROM_ID=
@@ -213,7 +213,7 @@ TZ=${TZ}
 
 EOF
 
-cat <<EOF > .env.vaultwarden-kavula
+cat <<EOF > .env.vaultwarden-instance_2
 # vim: syntax=ini
 
 ## Vaultwarden Configuration File
@@ -307,7 +307,7 @@ DUO_HOST=api-f5fbcbd9.duosecurity.com
 ## Note: if SMTP_USERNAME is specified, SMTP_PASSWORD is mandatory
 
 SMTP_FROM=${SMTP_VAULTWARDEN_FROM_ID}@${SMTP_FROM_DOMAIN}
-SMTP_FROM_NAME=Vaultwarden (${KAVULA_DOMAIN})
+SMTP_FROM_NAME=Vaultwarden (${INSTANCE_2_DOMAIN})
 
 # SMTP_PORT=587          # Ports 587 (submission) and 25 (smtp) are standard without encryption and with encryption via STARTTLS (Explicit TLS). Port 465 is outdated and used with Implicit TLS.
 # SMTP_SSL=true          # (Explicit) - This variable by default configures Explicit STARTTLS, it will upgrade an insecure connection to a secure one. Unless SMTP_EXPLICIT_TLS is set to true. Either port 587 or 25 are default.
@@ -353,7 +353,7 @@ SMTP_PASSWORD=${SMTP_PASSWORD}
 
 ## HIBP Api Key
 ## HaveIBeenPwned API Key, request it here: https://haveibeenpwned.com/API/Key
-HIBP_API_KEY=3ce5956abc394e66bbfd9dbd49281baf
+HIBP_API_KEY=
 
 #using cloudflare rules to redirect icon requests (actually using google icon service there), we do not need to use ICON_SERVICE here
 #ICON_SERVICE=google
@@ -378,7 +378,6 @@ cat <<EOF > .env.fail2ban
 
 F2B_DB_PURGE_AGE=30d
 F2B_LOG_LEVEL=INFO
-F2B_IPTABLES_CHAIN=INPUT
 SSMTP_HOST=${SMTP_HOST}
 SSMTP_PORT=${SMTP_PORT}
 SSMTP_USER=${SMTP_USERNAME}
