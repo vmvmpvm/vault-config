@@ -21,6 +21,7 @@ DOMAIN=https://${VW_DOMAIN}/${VW_APP_PATH}
 
 _ENABLE_DUO=true
 DUO_IKEY=DIUJPAN76VGSEYPVOB3P
+DUO_SKEY=${secrets.DUO_SKEY}
 DUO_HOST=api-f5fbcbd9.duosecurity.com
 
 # Mail
@@ -33,3 +34,6 @@ SMTP_PASSWORD=${SMTP_PASSWORD}
 TZ=${TZ}
 
 HIBP_API_KEY={secrets.HIBP_API_KEY}
+
+# Outbound traffic goes through the egress proxy, which has a private IP
+HTTP_REQUEST_BLOCK_NON_GLOBAL_IPS=false
