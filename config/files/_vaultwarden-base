@@ -33,7 +33,7 @@ SMTP_PASSWORD=${SMTP_PASSWORD}
 
 TZ=${TZ}
 
-HIBP_API_KEY={secrets.HIBP_API_KEY}
+HIBP_API_KEY=${secrets.HIBP_API_KEY}
 
 # Outbound traffic goes through the egress proxy, which has a private IP
 HTTP_REQUEST_BLOCK_NON_GLOBAL_IPS=false
