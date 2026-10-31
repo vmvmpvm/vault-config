@@ -1,0 +1,173 @@
+# Config: values and secrets
+
+```
+config/common.env           shared inputs (plain values, composites, secret references)
+config/files/…              one source file per generated file; sources for files that live in a folder
+                            (cloudflared/, fail2ban/…) sit in the same folder here, root files keep descriptive names
+scripts/render.py           GitHub Action: resolves everything into one bundle (Python 3, stdlib only)
+scripts/apply-config.sh     deploy pipeline: writes the files from the downloaded bundle (bash + base64 + git)
+.github/workflows/sync-config-to-gcp.yml   renders the bundle and pushes it to Google Secret Manager
+```
+
+Flow: GitHub Action runs `render.py` -> new Secret Manager version -> your pipeline downloads it ->
+`apply-config.sh bundle [--dest DIR]` writes the files and sets the git identity.
+
+Python is only needed where `render.py` runs, i.e. the GitHub runner (preinstalled). The pipeline that applies
+the bundle needs no Python and no `jq`.
+
+## Bundle format
+
+Plain text: line 1 is `config-bundle v1`, then one line per file: `<output path> <base64 of the content>`.
+Read it with `base64 -d`; secrets are therefore not human-readable in the Secret Manager console (not encryption).
+
+## Trust model
+
+The secret is **data**. `apply-config.sh` lives in your pipeline and never executes or evaluates anything from it.
+It has a hardcoded allowlist of output paths and modes (`ALLOWED`): a bundle with any other path, a missing or
+duplicate entry, bad base64 or a malformed identity is refused and nothing is changed. Someone who can push a
+secret version can change the _contents_ of the allowlisted files, but cannot run code or write anywhere else.
+Even the git identity is data: the script validates it and runs `git config --global` itself, passing the values
+as arguments. Keep it that way: if you ever add an output that your pipeline _executes_, whoever controls the
+secret controls that code.
+
+## Placeholders
+
+| Write             | Meaning                                                            |
+| ----------------- | ------------------------------------------------------------------ |
+| `${NAME}`         | value of `NAME` in `common.env` (or a `%include` argument)         |
+| `${secrets.NAME}` | the GitHub repository secret `NAME` (looked up case-insensitively) |
+| `$${`             | a literal `${` as the final consumer sees it                       |
+
+- Resolution is single pass: a substituted value is never re-scanned, so secrets may contain `$`, `{` and so on.
+- Placeholders always mean the shared inputs, never other lines of the same file.
+- `common.env` values may reference each other (any order, cycles are errors).
+- Full-line comments (`#`) are copied verbatim and never expanded.
+
+## Blank, secret, or not filled in
+
+- `KEY=` is **intentionally blank**.
+- `KEY=${secrets.NAME}` is a **secret**; a missing or empty GitHub secret fails the build.
+- `KEY=__FILL_ME__` is **not filled in yet**; the build fails if anything uses it.
+- An undefined `${NAME}` fails the build.
+
+## Directives (full lines in a source file)
+
+- `%include _fragment NAME=value …` inlines `config/files/_fragment`; `NAME` becomes `${NAME}` inside it.
+- `%% text` is a source-only comment, not written to the output.
+- Files and folders starting with `_` are fragments and are never written out.
+
+## Which source becomes which file
+
+The `OUTPUTS` table at the top of `render.py` maps each source file to its output path. A source that is not
+listed is an error, and so is a listed source that does not exist. Keys are paths relative to `config/files/`.
+
+Layout convention: a file that lives in a folder (`cloudflared/config.yml`, `fail2ban/jail.d/jail.local`, …) has its
+source in the same folder under `config/files/`, so it is self-explanatory. Files in the repository root keep
+descriptive names (`compose-project.env` -> `.env`), because several of them are dotfiles, which are easy to lose
+in listings and downloads. The table stays explicit either way: nothing is mirrored implicitly. Error messages show
+the full relative path, since names such as `config.yml` can repeat across folders.
+
+Adding a new output file takes three edits: the source in `config/files/`, one line in `OUTPUTS`
+(`render.py`), one `"path:mode"` line in `ALLOWED` (`apply-config.sh`). If the two lists drift apart, the
+apply script refuses the bundle rather than guessing. Output paths must not contain whitespace.
+
+## Git identity
+
+`git-identity.env` (source in `config/files/`) holds exactly `email=` and `name=`, filled from
+`GitHubUserEmailId` and `GitHubUserFullName` in `common.env`. `apply-config.sh` does not write it to disk: it
+checks that both are present, once each, non-empty, without leading/trailing spaces or control characters and not
+starting with `-`, then runs `git config --global user.email …` and `user.name …` for the user running the
+pipeline. Validation happens before any file is written, so a bad identity changes nothing. To drop this feature,
+remove the entry from `OUTPUTS` (`render.py`) and the git handling from `apply-config.sh`.
+
+## UID/GID values shared with the deployment script
+
+`ContainerUID`, `ContainerGID`, `dockremapUIDRangeStart` and `dockremapGIDRangeStart` are defined once, in
+`common.env`. They reach compose (`.env`), `cloud-config.yaml` (once migrated) and the deployment script through
+`deploy-ids.env`. `apply-config.sh` writes that file only if it consists of exactly those four `KEY=<number>`
+lines (digits only, no leading zeros, nothing else), so the deployment script can `source` it and use `$(( ))`
+safely. Do not source or do arithmetic on values from the bundle that were not validated this way.
+
+```bash
+bash ./scripts/apply-config.sh "$configBundleFileName" || { echo "apply-config failed" >&2; exit 1; }
+source ./deploy-ids.env
+ContainerUIDOnHost=$((dockremapUIDRangeStart + ContainerUID))
+ContainerGIDOnHost=$((dockremapGIDRangeStart + ContainerGID))
+```
+
+The positional-argument overrides of the old script are gone on purpose: a single place means no overrides.
+The ids are available only after the bundle has been applied.
+
+## Env files (output name starts with `.env`)
+
+Substituted values get `$` -> `$$` so Docker Compose's `env_file:` reads them literally. Values with a newline,
+leading/trailing whitespace, a leading quote or ` #` are rejected. In the source, write `$$` for a literal dollar
+sign. Put multi-line secrets (like the tunnel credentials) in a non-env output file.
+
+## Adding a variable
+
+- Used in one file: add `KEY=value` (or `KEY=${secrets.KEY}`) to that file in `config/files/`.
+- Used in several files: add it to `common.env`, then `${KEY}` where needed.
+- Secret: create the GitHub repository secret with the same name, then run the workflow manually
+  (changing only a secret does not trigger a push).
+
+## One-time setup
+
+GitHub repository variables: `GCP_PROJECT`, `GCP_SECRET_NAME`, `GCP_WIF_PROVIDER`, `GCP_SERVICE_ACCOUNT`.
+The workflow's service account needs permission to add secret versions (and create the secret the first time);
+the pipeline's service account needs only `roles/secretmanager.secretAccessor`. Restrict the Workload Identity
+provider to this repository and the `main` branch.
+
+Check locally without secrets: `python3 scripts/render.py --config config --dry-run`.
+Check the apply step without writing: `scripts/apply-config.sh bundle --dry-run`.
+
+## Files the old script patched with `sed`
+
+`cloud-config.yaml`, `fail2ban/jail.d/jail.local` and `fail2ban/action.d/cloudflare-iplist.conf` are now generated
+from the sources `vm-cloud-config.yaml`, `fail2ban/jail.d/jail.local` and `fail2ban/action.d/cloudflare-iplist.conf`
+under `config/files/` (the last two sit at the same relative path as their output). In them, the old `sed`
+targets became placeholders (`${dockremapUIDRangeStart}`,
+`${GCPTimeZone}`, `destemail = ${fail2ban_email_recipient}`, `cftoken = ${secrets.CLOUDFLARE_IP_LIST_MODIFY_TOKEN}`, ...); everything else
+is the original text. A literal `${` in these files would have to be written `$${`; there are none.
+
+## Generated files: keep them out of git
+
+Everything `apply-config.sh` writes is generated, and several files contain secrets. Delete the old copies of the
+three files above from the repository, otherwise the next run overwrites a tracked file that now holds a token.
+Suggested `.gitignore` (the leading `/` anchors each pattern to the repository root, so the sources under
+`config/files/` stay tracked):
+
+```
+/.env
+/.env.*
+/cloudflared/config.yml
+/cloudflared/vault-tunnel-cred.json
+/deploy-ids.env
+/cloud-config.yaml
+/fail2ban/jail.d/jail.local
+/fail2ban/action.d/cloudflare-iplist.conf
+```
+
+## File modes
+
+`.env*` files are `600`. The cloudflared files and the fail2ban files are read inside non-root containers as a
+user-namespace-remapped UID, so they are `644` (this includes the tunnel credentials and `cloudflare-iplist.conf`,
+which holds the Cloudflare token). That matches what the old script produced with a default umask. To tighten to
+`640`, have the deployment script `chgrp` them to `ContainerGIDOnHost` (from `deploy-ids.env`) and change the
+mode in `ALLOWED`.
+
+## docker-compose.yml: the Actual Budget secret
+
+Replace the hardcoded value (and rotate the old one):
+
+```yaml
+ACTUAL_OPENID_CLIENT_SECRET: ${ACTUAL_OPENID_CLIENT_SECRET} # rendered into .env
+```
+
+## Notes
+
+- Secret Manager holds at most 64 KiB per version; the renderer fails above ~60 KB (base64 adds about a third).
+- Every push adds a new secret version. Disable or destroy old versions that contain rotated secrets.
+- Files are staged and then moved into place, so a failed write never leaves a half-written set. A crash in the
+  middle of the final moves could still leave a mix of old and new files; rerunning fixes it.
+- The script needs bash 3.2 or newer and GNU-style `base64 -d`; it is written for Linux pipelines.

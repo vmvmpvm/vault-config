@@ -1,0 +1,61 @@
+name: Sync config to Google Secret Manager
+
+on:
+  push:
+    branches: [main]
+
+  pull_request:
+
+  # Changing only a GitHub secret does not trigger a push, so run this manually afterwards.
+  workflow_dispatch:
+
+jobs:
+  validate:
+    # Pull requests get no secrets: check structure only (undefined names, typos, cycles, unfilled values).
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 scripts/render.py --config config --dry-run
+
+  sync:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # Workload Identity Federation
+    concurrency:
+      group: sync-config
+      cancel-in-progress: false
+    env:
+      GCP_PROJECT: ${{ vars.GCP_PROJECT }}
+      GCP_SECRET_NAME: ${{ vars.GCP_SECRET_NAME }} # e.g. vault-config
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Render config bundle
+        env:
+          ALL_SECRETS: ${{ toJSON(secrets) }}
+        run: python3 scripts/render.py --config config --out "$RUNNER_TEMP/bundle.json" --mask
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Push new secret version
+        run: |
+          set -euo pipefail
+          if ! gcloud secrets describe "$GCP_SECRET_NAME" --project "$GCP_PROJECT" >/dev/null 2>&1; then
+            gcloud secrets create "$GCP_SECRET_NAME" --project "$GCP_PROJECT" --replication-policy=automatic
+          fi
+          gcloud secrets versions add "$GCP_SECRET_NAME" --project "$GCP_PROJECT" \
+            --data-file="$RUNNER_TEMP/bundle.json"
+
+      - name: Remove temp file
+        if: always()
+        run: shred -u "$RUNNER_TEMP/bundle.json" 2>/dev/null || rm -f "$RUNNER_TEMP/bundle.json"

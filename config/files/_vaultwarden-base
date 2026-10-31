@@ -1,0 +1,25 @@
+%% Shared Vaultwarden settings, included by both instance files:
+%%   %include _vaultwarden-base VW_DOMAIN=<value> VW_APP_PATH=<value>
+%% Only settings that differ from Vaultwarden's defaults are listed.
+
+# Client IP header (default: X-Real-IP)
+IP_HEADER=X-Forwarded-For
+# Websocket notifications
+WEBSOCKET_ENABLED=true
+# Icons are redirected by cloudflare rules (default: false)
+DISABLE_ICON_DOWNLOAD=true
+# New users only via whitelisted domains or invitation (default: true)
+SIGNUPS_ALLOWED=false
+# New users must verify their email address (default: false)
+SIGNUPS_VERIFY=true
+
+DOMAIN=https://${VW_DOMAIN}/${VW_APP_PATH}
+
+# Mail
+SMTP_HOST=${SMTP_HOST}
+SMTP_FROM=${SMTP_VAULTWARDEN_FROM_ID}@${SMTP_FROM_DOMAIN}
+SMTP_FROM_NAME=Vaultwarden (${VW_DOMAIN})
+SMTP_USERNAME=${SMTP_USERNAME}
+SMTP_PASSWORD=${SMTP_PASSWORD}
+
+TZ=${TZ}
