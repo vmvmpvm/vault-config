@@ -41,10 +41,10 @@ OUTPUTS = {
     "cloudflared/config.yml": "cloudflared/config.yml",
     "cloudflared/vault-tunnel-cred.json": "cloudflared/vault-tunnel-cred.json",
     "fail2ban/jail.d/jail.local": "fail2ban/jail.d/jail.local",
-    "fail2ban/action.d/cloudflare-iplist.conf": "fail2ban/action.d/cloudflare-iplist.conf",
     "deploy-ids.env": "deploy-ids.env",  # UID/GID numbers for the deployment script (single source)
     "git-identity.env": "git-identity.env",  # data: apply-config.sh turns it into gitconfig.sh
-    "vm-values.env": "vm-values.env",  # data: apply-config.sh substitutes it into ./cloud-config.yaml
+    "cloudflare-values.env": "cloudflare-values.env",  # data: apply-config.sh substitutes it into fail2ban/action.d/cloudflare-iplist.tmpl.conf
+    "vm-values.env": "vm-values.env",  # data: apply-config.sh substitutes it into cloud-config.tmpl.yaml
 }
 
 TOKEN = re.compile(r"\$\$\{|\$\{([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)\}")

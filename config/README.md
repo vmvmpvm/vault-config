@@ -6,12 +6,14 @@ config/files/…              one source file per generated file; sources for fi
                             (cloudflared/, fail2ban/…) sit in the same folder here, root files keep descriptive names
 scripts/render.py           GitHub Action: resolves everything into one bundle (Python 3, stdlib only)
 scripts/apply-config.sh     deploy pipeline: writes the files from the downloaded bundle (bash + base64)
-cloud-config.yaml        cloud-config template, used from the repository folder (not part of the bundle)
+cloud-config.tmpl.yaml      cloud-config template, used from the repository folder (not part of the bundle)
+fail2ban/action.d/cloudflare-iplist.tmpl.conf   fail2ban action template, same idea (output: ...cloudflare-iplist.conf)
 .github/workflows/sync-config-to-gcp.yml   renders the bundle and pushes it to Google Secret Manager
 ```
 
 Flow: GitHub Action runs `render.py` -> new Secret Manager version -> your pipeline downloads it ->
-`apply-config.sh bundle [--dest DIR] [--template FILE]` writes the files, `gitconfig.sh` and `cloud-config.yaml`.
+`apply-config.sh bundle [--dest DIR] [--src DIR]` writes the files, `gitconfig.sh`,
+`cloud-config.yaml` and `fail2ban/action.d/cloudflare-iplist.conf`.
 
 Python is only needed where `render.py` runs, i.e. the GitHub runner (preinstalled). The pipeline that applies
 the bundle needs no Python and no `jq`.
@@ -26,18 +28,18 @@ Read it with `base64 -d`; secrets are therefore not human-readable in the Secret
 The secret is **data**. `apply-config.sh` lives in your pipeline and never executes or evaluates anything from it.
 It has a hardcoded allowlist of output paths and modes (`ALLOWED`): a bundle with any other path, a missing or
 duplicate entry, bad base64 or a malformed identity is refused and nothing is changed. Someone who can push a
-secret version can change the _contents_ of the allowlisted files, but cannot run code or write anywhere else.
+secret version can change the *contents* of the allowlisted files, but cannot run code or write anywhere else.
 Even the git identity is data: the script validates it and generates `gitconfig.sh` itself from the validated
 values. Your pipeline runs that file, so keep the validation strict: if you ever add an output that your pipeline
-_executes_ and that is copied from the bundle, whoever controls the secret controls that code.
+*executes* and that is copied from the bundle, whoever controls the secret controls that code.
 
 ## Placeholders
 
-| Write             | Meaning                                                            |
-| ----------------- | ------------------------------------------------------------------ |
-| `${NAME}`         | value of `NAME` in `common.env` (or a `%include` argument)         |
+| Write | Meaning |
+|---|---|
+| `${NAME}` | value of `NAME` in `common.env` (or a `%include` argument) |
 | `${secrets.NAME}` | the GitHub repository secret `NAME` (looked up case-insensitively) |
-| `$${`             | a literal `${` as the final consumer sees it                       |
+| `$${` | a literal `${` as the final consumer sees it |
 
 - Resolution is single pass: a substituted value is never re-scanned, so secrets may contain `$`, `{` and so on.
 - Placeholders always mean the shared inputs, never other lines of the same file.
@@ -54,6 +56,7 @@ _executes_ and that is copied from the bundle, whoever controls the secret contr
 ## Directives (full lines in a source file)
 
 - `%include _fragment NAME=value …` inlines `config/files/_fragment`; `NAME` becomes `${NAME}` inside it.
+  Currently unused (there is a single Vaultwarden instance); it is there if you add a second one that should share settings.
 - `%% text` is a source-only comment, not written to the output.
 - Files and folders starting with `_` are fragments and are never written out.
 
@@ -77,26 +80,43 @@ apply script refuses the bundle rather than guessing. Output paths must not cont
 
 `git-identity.env` (source in `config/files/`) holds exactly `email=` and `name=`, filled from
 `GitHubUserEmailId` and `GitHubUserFullName` in `common.env`. `apply-config.sh` does not write it to disk: it
-checks that both are present, once each, non-empty, without leading/trailing spaces, control characters or
-apostrophes and not starting with `-`, then writes `gitconfig.sh` (mode 700) containing
+checks that both are present, once each, non-empty, without leading/trailing spaces or control characters and not
+starting with `-`, then writes `gitconfig.sh` (mode 700) containing
 
 ```bash
 git config --global user.email '<email>'
 git config --global user.name '<name>'
 ```
 
-The script does not run it; your pipeline does (`bash ./gitconfig.sh`). Apostrophes are rejected so that single
-quotes are enough to make each value one literal word. Validation happens before any file is written, so a bad
+The script does not run it; your pipeline does (`bash ./gitconfig.sh`). Each value is single-quoted and an
+embedded apostrophe is written as `'\''`, so any validated value (`O'Brien`, `$HOME`, quotes) is one literal word. Validation happens before any file is written, so a bad
 identity changes nothing. To drop this feature, remove the entry from `OUTPUTS` (`render.py`) and the git handling
 from `apply-config.sh`.
 
-## cloud-config.yaml (VM values)
+## Templates that live in the repository (cloud-config.yaml, cloudflare-iplist.conf)
 
-`cloud-config.yaml` stays in the repository root and is read from the current folder (or `--template FILE`),
-not from the bundle. The bundle carries only `vm-values.env` (source in `config/files/`), which holds exactly
-`dockremapUIDRangeStart`, `dockremapGIDRangeStart`, `GCPTimeZone` and `InteractiveDockerUser`.
-`apply-config.sh` validates each value (numbers; a timezone name; a Linux user name), replaces the four `${NAME}`
-placeholders in the template and writes `cloud-config.yaml` (644). Any other `${` left in the template is an error.
+Two files are not rendered in CI. Their templates stay in the repository and `apply-config.sh` fills them in
+locally from small data files in the bundle:
+
+| Template (repo, tracked) | Bundle data file (source in `config/files/`) | Output (generated, untracked) |
+|---|---|---|
+| `cloud-config.tmpl.yaml` | `vm-values.env`: `dockremapUIDRangeStart`, `dockremapGIDRangeStart`, `GCPTimeZone`, `InteractiveDockerUser` | `cloud-config.yaml` |
+| `fail2ban/action.d/cloudflare-iplist.tmpl.conf` | `cloudflare-values.env`: `cf_account_identifier`, `cf_list_id`, `cftoken` | `fail2ban/action.d/cloudflare-iplist.conf` |
+
+The script validates every value against a strict pattern (numbers; a timezone name; a Linux user name; letters,
+digits, `_` and `-` for the Cloudflare ids and token), replaces the `${NAME}` placeholders and writes the result
+(644). Any other `${` left in a template is an error. Templates are found under `--src` (default: the current
+folder, i.e. the repository checkout).
+
+Naming: `.tmpl` goes **before** the extension (`cloud-config.tmpl.yaml`), so editors still recognise the file type,
+and the output keeps the original name (`cloud-config.yaml`). Because the names differ, the tracked template is
+never overwritten, even when `--dest` is the checkout itself (as in a build pipeline). The generated files stay
+in `.gitignore`; the templates are tracked. fail2ban only loads an action file when a jail names it, so the extra
+`cloudflare-iplist.tmpl.conf` next to the real one is ignored. Because the templates are read from the repository
+checkout and not from the secret, whoever pushes a secret cannot change their text.
+
+The Cloudflare token is the only secret here: `cloudflare-values.env` is `cftoken=${secrets.cftoken}`. The
+template itself uses `${cftoken}`, never `${secrets.…}`, since it is not processed by `render.py`.
 
 ## UID/GID values shared with the deployment script
 
@@ -141,11 +161,11 @@ Check the apply step without writing: `scripts/apply-config.sh bundle --dry-run`
 
 ## Files the old script patched with `sed`
 
-`cloud-config.yaml`, `fail2ban/jail.d/jail.local` and `fail2ban/action.d/cloudflare-iplist.conf` are now generated
-from the template `cloud-config.yaml` (repository root), `fail2ban/jail.d/jail.local` and `fail2ban/action.d/cloudflare-iplist.conf`
-under `config/files/` (the last two sit at the same relative path as their output). In them, the old `sed`
+`cloud-config.yaml`, `fail2ban/jail.d/jail.local` and `fail2ban/action.d/cloudflare-iplist.conf` are now generated:
+`jail.local` by `render.py` from `config/files/fail2ban/jail.d/jail.local`, the other two by `apply-config.sh` from
+the repository templates above. In them, the old `sed`
 targets became placeholders (`${dockremapUIDRangeStart}`,
-`${GCPTimeZone}`, `destemail = ${fail2ban_email_recipient}`, `cftoken = ${secrets.cftoken}`, ...); everything else
+`${GCPTimeZone}`, `destemail = ${fail2ban_email_recipient}`, `cftoken = ${cftoken}`, ...); everything else
 is the original text. A literal `${` in these files would have to be written `$${`; there are none.
 
 ## Generated files: keep them out of git
@@ -180,7 +200,7 @@ mode in `ALLOWED`.
 Replace the hardcoded value (and rotate the old one):
 
 ```yaml
-ACTUAL_OPENID_CLIENT_SECRET: ${ACTUAL_OPENID_CLIENT_SECRET} # rendered into .env
+ACTUAL_OPENID_CLIENT_SECRET: ${ACTUAL_OPENID_CLIENT_SECRET}   # rendered into .env
 ```
 
 ## Notes
