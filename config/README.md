@@ -12,7 +12,7 @@ fail2ban/action.d/cloudflare-iplist.tmpl.conf   fail2ban action template, same i
 ```
 
 Flow: GitHub Action runs `render.py` -> new Secret Manager version -> your pipeline downloads it ->
-`apply-config.sh bundle [--dest DIR] [--src DIR]` writes the files, `gitconfig.sh`,
+`apply-config.sh bundle [--dest DIR] [--src DIR] [--keep-templates]` writes the files, `gitconfig.sh`,
 `cloud-config.yaml` and `fail2ban/action.d/cloudflare-iplist.conf`.
 
 Python is only needed where `render.py` runs, i.e. the GitHub runner (preinstalled). The pipeline that applies
@@ -65,7 +65,7 @@ values. Your pipeline runs that file, so keep the validation strict: if you ever
 The `OUTPUTS` table at the top of `render.py` maps each source file to its output path. A source that is not
 listed is an error, and so is a listed source that does not exist. Keys are paths relative to `config/files/`.
 
-Layout convention: a file that lives in a folder (`cloudflared/config.yml`, `fail2ban/jail.d/jail.local`, …) has its
+Layout convention: a file that lives in a folder (`cloudflared/config.yml`, …) has its
 source in the same folder under `config/files/`, so it is self-explanatory. Files in the repository root keep
 descriptive names (`compose-project.env` -> `.env`), because several of them are dotfiles, which are easy to lose
 in listings and downloads. The table stays explicit either way: nothing is mirrored implicitly. Error messages show
@@ -93,18 +93,23 @@ embedded apostrophe is written as `'\''`, so any validated value (`O'Brien`, `$H
 identity changes nothing. To drop this feature, remove the entry from `OUTPUTS` (`render.py`) and the git handling
 from `apply-config.sh`.
 
-## Templates that live in the repository (cloud-config.yaml, cloudflare-iplist.conf)
+## Templates that live in the repository (cloud-config, cloudflare-iplist, jail.local, smtp-direct)
 
-Two files are not rendered in CI. Their templates stay in the repository and `apply-config.sh` fills them in
+Four files are not rendered in CI. Their templates stay in the repository and `apply-config.sh` fills them in
 locally from small data files in the bundle:
 
 | Template (repo, tracked) | Bundle data file (source in `config/files/`) | Output (generated, untracked) |
 |---|---|---|
 | `cloud-config.tmpl.yaml` | `vm-values.env`: `dockremapUIDRangeStart`, `dockremapGIDRangeStart`, `GCPTimeZone`, `InteractiveDockerUser` | `cloud-config.yaml` |
 | `fail2ban/action.d/cloudflare-iplist.tmpl.conf` | `cloudflare-values.env`: `cf_account_identifier`, `cf_list_id`, `cftoken` | `fail2ban/action.d/cloudflare-iplist.conf` |
+| `fail2ban/jail.d/jail.tmpl.local` | `fail2ban-values.env`: `fail2ban_email_recipient`, `fail2ban_email_sender`, `fail2ban_email_sendername` | `fail2ban/jail.d/jail.local` |
+| `fail2ban/action.d/smtp-direct.tmpl.conf` | `fail2ban-values.env` (same file, plus `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`) | `fail2ban/action.d/smtp-direct.conf` |
 
 The script validates every value against a strict pattern (numbers; a timezone name; a Linux user name; letters,
-digits, `_` and `-` for the Cloudflare ids and token), replaces the `${NAME}` placeholders and writes the result
+digits, `_` and `-` for the Cloudflare ids and token; letters, digits and `. _ + @ - , space` for the e-mail
+values; the SMTP password only `A-Z a-z 0-9 . _ ~ + -`, because it is placed inside a shell command in fail2ban's
+`actionban`. A password with other characters is refused, not escaped. The password ends up in a 644 file on the host,
+like the Cloudflare token), replaces the `${NAME}` placeholders and writes the result
 (644). Any other `${` left in a template is an error. Templates are found under `--src` (default: the current
 folder, i.e. the repository checkout).
 
@@ -112,8 +117,16 @@ Naming: `.tmpl` goes **before** the extension (`cloud-config.tmpl.yaml`), so edi
 and the output keeps the original name (`cloud-config.yaml`). Because the names differ, the tracked template is
 never overwritten, even when `--dest` is the checkout itself (as in a build pipeline). The generated files stay
 in `.gitignore`; the templates are tracked. fail2ban only loads an action file when a jail names it, so the extra
-`cloudflare-iplist.tmpl.conf` next to the real one is ignored. Because the templates are read from the repository
+`cloudflare-iplist.tmpl.conf` next to the real one is ignored. **`jail.d` is different**: fail2ban loads every
+`*.local` file in it, so `jail.tmpl.local` would be read as a real jail file with the placeholders as values. That is
+one more reason the templates are deleted after processing, and why the folder that is mounted into the fail2ban
+container must be the one the output was written to, with no template left in it. Because the templates are read from the repository
 checkout and not from the secret, whoever pushes a secret cannot change their text.
+
+After everything has been written successfully, `apply-config.sh` deletes the four template files from `--src`
+(only those four, by fixed name), so they are not deployed along with the results. A failed or `--dry-run` run
+deletes nothing. This is meant for a build pipeline with a fresh checkout per run: a second run in the same
+folder fails with "cannot read template". For local use, pass `--keep-templates` (or `git restore` the files).
 
 The Cloudflare token is the only secret here: `cloudflare-values.env` is `cftoken=${secrets.cftoken}`. The
 template itself uses `${cftoken}`, never `${secrets.…}`, since it is not processed by `render.py`.
@@ -162,8 +175,7 @@ Check the apply step without writing: `scripts/apply-config.sh bundle --dry-run`
 ## Files the old script patched with `sed`
 
 `cloud-config.yaml`, `fail2ban/jail.d/jail.local` and `fail2ban/action.d/cloudflare-iplist.conf` are now generated:
-`jail.local` by `render.py` from `config/files/fail2ban/jail.d/jail.local`, the other two by `apply-config.sh` from
-the repository templates above. In them, the old `sed`
+the three fail2ban/cloud-config files by `apply-config.sh` from the repository templates above. In them, the old `sed`
 targets became placeholders (`${dockremapUIDRangeStart}`,
 `${GCPTimeZone}`, `destemail = ${fail2ban_email_recipient}`, `cftoken = ${cftoken}`, ...); everything else
 is the original text. A literal `${` in these files would have to be written `$${`; there are none.
@@ -184,6 +196,7 @@ Suggested `.gitignore` (the leading `/` anchors each pattern to the repository r
 /cloud-config.yaml
 /gitconfig.sh
 /fail2ban/jail.d/jail.local
+/fail2ban/action.d/smtp-direct.conf
 /fail2ban/action.d/cloudflare-iplist.conf
 ```
 
